@@ -124,7 +124,7 @@ def pct(v):
 # ── Data Loading ──────────────────────────────────────────────────────────────
 @st.cache_data
 def load_data():
-    df = pd.read_excel("clustered_superchargers_AMER.xlsx", engine="openpyxl")
+    df = pd.read_excel("clustered_superchargers_AMER_v2.xlsx", engine="openpyxl")
     # All financial and numeric columns are already native float/int in the Excel file.
 
     # Network-wide percentile ranks for risk scoring (not within-tier)
@@ -259,7 +259,6 @@ with st.sidebar:
     )
 
     st.divider()
-    st.caption(f"Should-Cost Model R²: **{opex_r2:.3f}**")
 
 # Apply global filters
 fdf = df[
@@ -281,7 +280,7 @@ if len(fdf) == 0:
 # SECTION 1 — DESCRIPTIVE
 # =============================================================================
 def render_descriptive(fdf):
-    st.markdown("## Network Overview - Historical Spend")
+    st.markdown("## Network Overview")
 
     # KPI Cards
     stats = (
@@ -296,6 +295,9 @@ def render_descriptive(fdf):
         .reindex([c for c in CLUSTER_ORDER if c in fdf["Cluster"].unique()])
     )
 
+    if "selected_tier" not in st.session_state:
+        st.session_state["selected_tier"] = None
+
     cols = st.columns(len(stats))
     for i, (cluster, row) in enumerate(stats.iterrows()):
         color = CLUSTER_COLORS[cluster]
@@ -303,16 +305,54 @@ def render_descriptive(fdf):
             st.markdown(
                 f'<div class="kpi-card" style="border-top:3px solid {color}">'
                 f'<div class="kpi-label">{cluster}</div>'
-                f'<div class="kpi-value">{fmt_m(row.AvgRev)}</div>'
+                f'<div class="kpi-value">{fmt_m(row.AvgOpex)}</div>'
                 f'<div style="font-size:12px;color:#9ca3af;margin-top:2px">'
-                f'avg annual revenue &nbsp;·&nbsp; {row.N:,.0f} sites</div>'
+                f'avg annual opex &nbsp;·&nbsp; {row.N:,.0f} sites</div>'
                 f'<div class="kpi-row">'
-                f'<span>Avg Opex: <b>{fmt_m(row.AvgOpex)}</b></span>'
+                f'<span>Avg Rev: <b>{fmt_m(row.AvgRev)}</b></span>'
                 f'<span>Margin: <b>{pct(row.AvgMargin)}</b></span>'
                 f'<span>TCO/kWh: <b>${row.AvgTCO:.3f}</b></span>'
                 f'</div></div>',
                 unsafe_allow_html=True,
             )
+            is_active = st.session_state["selected_tier"] == cluster
+            label = "▲ Close" if is_active else "View sites →"
+            if st.button(label, key=f"tier_btn_{i}"):
+                st.session_state["selected_tier"] = None if is_active else cluster
+                st.rerun()
+
+    # Tier drill-down
+    active_tier = st.session_state["selected_tier"]
+    if active_tier and active_tier in fdf["Cluster"].values:
+        color = CLUSTER_COLORS[active_tier]
+        st.markdown(
+            f'<div style="border-left:4px solid {color};padding:6px 14px;'
+            f'margin:12px 0 4px 0;font-size:15px;font-weight:600;">'
+            f'{active_tier} - Site Detail</div>',
+            unsafe_allow_html=True,
+        )
+        tier_sites = fdf[fdf["Cluster"] == active_tier][[
+            "Supercharger", "State", "City", "version", "Stalls",
+            "Capacity_kw_total", "site_age_years",
+            "Annual_revenue_usd", "Annual_opex_usd", "Profit_margin",
+            "Opex_per_stall", "TCO_per_kwh_usd", "Opex_Gap_Pct", "Risk_Tier",
+        ]].copy().sort_values("Opex_Gap_Pct", ascending=False)
+
+        tier_sites["Annual_revenue_usd"] = tier_sites["Annual_revenue_usd"].apply(fmt_m)
+        tier_sites["Annual_opex_usd"]    = tier_sites["Annual_opex_usd"].apply(fmt_m)
+        tier_sites["Opex_per_stall"]     = tier_sites["Opex_per_stall"].apply(fmt_m)
+        tier_sites["Profit_margin"]      = tier_sites["Profit_margin"].apply(pct)
+        tier_sites["TCO_per_kwh_usd"]    = tier_sites["TCO_per_kwh_usd"].apply(lambda v: f"${v:.3f}")
+        tier_sites["Opex_Gap_Pct"]       = tier_sites["Opex_Gap_Pct"].apply(
+            lambda v: f"{v*100:+.1f}%" if pd.notna(v) else "–"
+        )
+        tier_sites["site_age_years"]     = tier_sites["site_age_years"].apply(lambda v: f"{v:.1f}")
+        tier_sites.columns = [
+            "Site", "State", "City", "Version", "Stalls", "Capacity (kW)",
+            "Age (yrs)", "Revenue", "Opex", "Margin",
+            "Opex/Stall", "TCO/kWh", "Cost Variance", "Risk Tier",
+        ]
+        st.dataframe(tier_sites, use_container_width=True, hide_index=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -343,17 +383,17 @@ def render_descriptive(fdf):
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        rev = fdf.groupby("Cluster")["Annual_revenue_usd"].sum().reset_index()
+        opex_share = fdf.groupby("Cluster")["Annual_opex_usd"].sum().reset_index()
         fig2 = go.Figure(go.Pie(
-            labels=rev["Cluster"],
-            values=rev["Annual_revenue_usd"],
+            labels=opex_share["Cluster"],
+            values=opex_share["Annual_opex_usd"],
             hole=0.55,
-            marker_colors=[CLUSTER_COLORS[c] for c in rev["Cluster"]],
+            marker_colors=[CLUSTER_COLORS[c] for c in opex_share["Cluster"]],
             textinfo="percent+label",
             hovertemplate="<b>%{label}</b><br>$%{value:,.0f}<br>%{percent}<extra></extra>",
         ))
         fig2.update_layout(
-            title="Revenue Share by Cluster",
+            title="Opex Concentration by Cluster",
             showlegend=False,
             height=390,
             margin=dict(l=20, r=20, t=40, b=10),
@@ -426,6 +466,19 @@ def render_descriptive(fdf):
 def render_prescriptive(df_full, fdf):
     st.markdown("## Procurement Intelligence (Should-Cost & Benchmarks)")
 
+    # ── Total savings opportunity banner ──────────────────────────────────────
+    pos_gap       = fdf[fdf["Opex_Gap"] > 0].dropna(subset=["Opex_Gap", "Opex_Gap_Pct"])
+    total_savings = pos_gap["Opex_Gap"].sum()
+    sites_above   = len(pos_gap)
+    avg_gap_pct   = pos_gap["Opex_Gap_Pct"].mean() if len(pos_gap) > 0 else 0
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Total Addressable Savings", fmt_m(total_savings),
+              delta=f"{sites_above} sites above benchmark", delta_color="inverse")
+    s2.metric("Sites Above Should-Cost", f"{sites_above:,}",
+              delta=f"{sites_above/len(fdf)*100:.0f}% of network in view")
+    s3.metric("Avg Cost Variance", f"{avg_gap_pct*100:+.1f}%",
+              delta="vs peer-based benchmark", delta_color="inverse")
+
     tab_calc, tab_bench = st.tabs(["Should-Cost Calculator", "Benchmark & Upgrade ROI"])
 
     # ── Tab A: Should-Cost Calculator ─────────────────────────────────────────
@@ -438,18 +491,22 @@ def render_prescriptive(df_full, fdf):
             sc_state  = st.selectbox("State", sorted(df_full["State"].dropna().unique().tolist()))
             sc_cor    = "High EV Adoption Corridor" if sc_state in HIGH_EV_STATES else "Lower EV Adoption Corridor"
             st.caption(f"Corridor: **{sc_cor}**")
-            sc_size   = st.selectbox("Size Band", ["Small", "Medium", "Large"])
-            sc_stalls = st.slider("Stalls", 4, 30, 10)
+            sc_stalls   = st.slider("Stalls", 2, 80, 10)
+            sc_size     = "Large" if sc_stalls >= 62 else ("Medium" if sc_stalls >= 31 else "Small")
+            st.caption(f"Size Band: **{sc_size}**")
+            sc_age      = st.slider("Site Age (yrs)", 1, 14, 7)
+            sc_age_band = "Old" if sc_age > 8 else ("Mid" if sc_age >= 3 else "New")
+            st.caption(f"Age Band: **{sc_age_band}** — moderate influence on should-cost (~3–5% of model weight)")
             ver_kw    = {"V1": 72, "V2": 150, "V3": 250}
             sc_cap    = sc_stalls * ver_kw.get(sc_ver, 150)
 
         with col_res:
             pred_opex  = predict_one(opex_model, opex_enc,
-                                     sc_ver, sc_cor, sc_size, "Mid",
-                                     sc_stalls, sc_cap, 7.0)
+                                     sc_ver, sc_cor, sc_size, sc_age_band,
+                                     sc_stalls, sc_cap, float(sc_age))
             pred_rev   = predict_one(rev_model, rev_enc,
-                                     sc_ver, sc_cor, sc_size, "Mid",
-                                     sc_stalls, sc_cap, 7.0)
+                                     sc_ver, sc_cor, sc_size, sc_age_band,
+                                     sc_stalls, sc_cap, float(sc_age))
 
             # Apply state cost index: avg opex gap for sites in this state
             state_adj  = state_gap_map.get(sc_state, 0.0)
@@ -486,17 +543,25 @@ def render_prescriptive(df_full, fdf):
                 direction = "above" if state_adj > 0 else "below"
                 st.info(
                     f"**Cluster:** {comp_cluster} &nbsp;·&nbsp; Cluster avg: {fmt_m(cl_avg)}  \n"
-                    f"**State index [{sc_state}]:** {state_adj*100:+.1f}% — {sc_state} sites "
+                    f"State index [{sc_state}]: {state_adj*100:+.1f}% - {sc_state} sites "
                     f"typically run {abs(state_adj)*100:.1f}% {direction} their model baseline. "
                     f"Base: {fmt_m(pred_opex)} → State-adjusted: {fmt_m(adj_opex)}"
                 )
             else:
                 st.info(f"**Cluster:** {comp_cluster} &nbsp;·&nbsp; Cluster avg: {fmt_m(cl_avg)}")
 
-            # Category breakdown
-            cat_names = ["Energy (62%)", "Preventive Maint (20%)",
-                         "Corrective Maint (10%)", "Site Services (5%)", "Network (3%)"]
-            cat_vals  = [adj_opex * r for r in [0.62, 0.20, 0.10, 0.05, 0.03]]
+            # Category breakdown — ratios from peer sites, not hardcoded
+            peer_pool = df_full[
+                (df_full["version"] == sc_ver) &
+                (df_full["Corridor"] == sc_cor) &
+                (df_full["Size_band"] == sc_size)
+            ]
+            if len(peer_pool) >= 3:
+                cat_ratios = [(peer_pool[c] / peer_pool["Annual_opex_usd"]).mean() for c in CAT_COLS]
+            else:
+                cat_ratios = [(df_full[c] / df_full["Annual_opex_usd"]).mean() for c in CAT_COLS]
+            cat_names = [f"{l} ({r*100:.0f}%)" for l, r in zip(CAT_LABELS, cat_ratios)]
+            cat_vals  = [adj_opex * r for r in cat_ratios]
             fig_cats = go.Figure(go.Bar(
                 x=cat_vals, y=cat_names, orientation="h",
                 marker_color=CAT_COLORS,
@@ -518,22 +583,151 @@ def render_prescriptive(df_full, fdf):
                 (df_full["Corridor"] == sc_cor) &
                 (df_full["Size_band"] == sc_size)
             ].nsmallest(5, "Opex_per_stall")[
-                ["Supercharger", "State", "Annual_opex_usd",
+                ["Supercharger", "State", "Annual_opex_usd", "Opex_per_stall",
                  "Annual_revenue_usd", "Profit_margin"]
             ].copy()
 
             if not peers.empty:
-                st.markdown("**5 lowest-cost peer sites (same version / corridor / size):**")
+                st.markdown("**5 most efficient peer sites (same version / corridor / size) — sorted by Opex/Stall:**")
                 peers["Annual_opex_usd"]    = peers["Annual_opex_usd"].apply(fmt_m)
+                peers["Opex_per_stall"]     = peers["Opex_per_stall"].apply(fmt_m)
                 peers["Annual_revenue_usd"] = peers["Annual_revenue_usd"].apply(fmt_m)
                 peers["Profit_margin"]      = peers["Profit_margin"].apply(pct)
-                peers.columns = ["Site", "State", "Opex", "Revenue", "Margin"]
+                peers.columns = ["Site", "State", "Opex", "Opex/Stall", "Revenue", "Margin"]
                 st.dataframe(peers, use_container_width=True, hide_index=True)
+
+        # ── Site-to-Site Comparison ────────────────────────────────────────────
+        st.divider()
+        st.markdown("### Site-to-Site Comparison")
+        selected_sites = st.multiselect(
+            "Select sites to compare (2–5 recommended)",
+            options=sorted(df_full["Supercharger"].dropna().tolist()),
+            max_selections=6,
+            key="site_compare",
+        )
+
+        if len(selected_sites) < 2:
+            st.caption("Select at least 2 sites to activate the comparison panel.")
+        else:
+            cmp_df = df_full[df_full["Supercharger"].isin(selected_sites)].set_index("Supercharger")
+            # Use selected order
+            cmp_df = cmp_df.loc[[s for s in selected_sites if s in cmp_df.index]]
+
+            # ── Comparison table (metrics as rows, sites as columns) ───────────
+            def _build_comparison_sections(rows_df):
+                return {
+                    "Profile": [
+                        ("State",          lambda r: r["State"]),
+                        ("Cluster",        lambda r: r["Cluster"]),
+                        ("Version",        lambda r: r["version"]),
+                        ("Stalls",         lambda r: str(int(r["Stalls"]))),
+                        ("Capacity (kW)",  lambda r: f"{int(r['Capacity_kw_total']):,}"),
+                        ("Age (yrs)",      lambda r: f"{r['site_age_years']:.1f}"),
+                        ("Corridor",       lambda r: r["Corridor"].replace(" Adoption Corridor", "")),
+                    ],
+                    "Financials": [
+                        ("Annual Revenue", lambda r: fmt_m(r["Annual_revenue_usd"])),
+                        ("Annual Opex",    lambda r: fmt_m(r["Annual_opex_usd"])),
+                        ("Profit Margin",  lambda r: pct(r["Profit_margin"])),
+                        ("Opex / Stall",   lambda r: fmt_m(r["Opex_per_stall"])),
+                        ("Rev / Stall",    lambda r: fmt_m(r["Revenue_per_stall"])),
+                        ("TCO / kWh",      lambda r: f"${r['TCO_per_kwh_usd']:.3f}"),
+                        ("Payback (yrs)",  lambda r: f"{r['Payback_years']:.1f}" if r["Payback_years"] < 99 else ">99"),
+                    ],
+                    "Should-Cost Analysis": [
+                        ("Should-Cost",    lambda r: fmt_m(r["Should_Cost"]) if pd.notna(r.get("Should_Cost")) else "–"),
+                        ("Opex Gap ($)",   lambda r: fmt_m(r["Opex_Gap"])    if pd.notna(r.get("Opex_Gap"))    else "–"),
+                        ("Opex Gap (%)",   lambda r: f"{r['Opex_Gap_Pct']*100:+.1f}%" if pd.notna(r.get("Opex_Gap_Pct")) else "–"),
+                        ("Risk Tier",      lambda r: r.get("Risk_Tier", "–") if pd.notna(r.get("Risk_Tier")) else "–"),
+                    ],
+                    "Category Spend": [
+                        ("Energy",          lambda r: fmt_m(r["Energy_spend"])),
+                        ("Preventive Maint",lambda r: fmt_m(r["Preventive_maint_spend"])),
+                        ("Corrective Maint",lambda r: fmt_m(r["Corrective_maint_spend"])),
+                        ("Site Services",   lambda r: fmt_m(r["Site_services_spend"])),
+                        ("Network",         lambda r: fmt_m(r["Network_spend"])),
+                    ],
+                }
+
+            for sec_name, metrics in _build_comparison_sections(cmp_df).items():
+                st.markdown(f"**{sec_name}**")
+                records = {label: {s: fn(cmp_df.loc[s]) for s in cmp_df.index}
+                           for label, fn in metrics}
+                st.dataframe(pd.DataFrame(records).T, use_container_width=True)
+
+            # ── Grouped bar: key financials ────────────────────────────────────
+            bar_metrics = ["Annual_revenue_usd", "Annual_opex_usd", "Should_Cost"]
+            bar_labels  = ["Annual Revenue", "Annual Opex", "Should-Cost"]
+            bar_colors  = ["#10B981", "#E31937", "#F59E0B"]
+
+            fig_cmp = go.Figure()
+            for col, label, color in zip(bar_metrics, bar_labels, bar_colors):
+                fig_cmp.add_trace(go.Bar(
+                    name=label,
+                    x=selected_sites,
+                    y=cmp_df[col].values / 1e6,
+                    marker_color=color,
+                    text=[f"${v/1e6:.1f}M" for v in cmp_df[col].values],
+                    textposition="outside",
+                ))
+            fig_cmp.update_layout(
+                barmode="group",
+                title="Revenue vs Opex vs Should-Cost ($M)",
+                yaxis=dict(title="$M"),
+                height=340,
+                legend=dict(orientation="h", y=-0.20),
+                margin=dict(l=10, r=10, t=40, b=10),
+                **DARK,
+            )
+            st.plotly_chart(fig_cmp, use_container_width=True)
+
+            # ── Stacked bar: category spend as % of opex ──────────────────────
+            fig_cat = go.Figure()
+            for label, col, color in zip(CAT_LABELS, CAT_COLS, CAT_COLORS):
+                pct_vals = (cmp_df[col] / cmp_df["Annual_opex_usd"] * 100).round(1)
+                fig_cat.add_trace(go.Bar(
+                    name=label,
+                    x=selected_sites,
+                    y=pct_vals.values,
+                    marker_color=color,
+                    text=[f"{v:.0f}%" for v in pct_vals.values],
+                    textposition="inside",
+                ))
+            fig_cat.update_layout(
+                barmode="stack",
+                title="Opex Category Mix (% of total opex)",
+                yaxis=dict(title="% of Opex", ticksuffix="%"),
+                height=300,
+                legend=dict(orientation="h", y=-0.28),
+                margin=dict(l=10, r=10, t=40, b=10),
+                **DARK,
+            )
+            st.plotly_chart(fig_cat, use_container_width=True)
+
+            # ── Cost variance callout ─────────────────────────────────────────
+            gap_series = cmp_df["Opex_Gap_Pct"].dropna()
+            if not gap_series.empty:
+                worst_site    = gap_series.idxmax()
+                best_site     = gap_series.idxmin()
+                cost_variance = (gap_series.max() - gap_series.min()) * 100
+                worst_gap     = gap_series.max() * 100
+                worst_gap_usd = cmp_df.loc[worst_site, "Opex_Gap"]
+                if worst_gap > 5:
+                    st.warning(
+                        f"**Priority for cost recovery:** {worst_site} is running {worst_gap:+.1f}% ({fmt_m(worst_gap_usd)}) above its should-cost benchmark.  \n"
+                        f"**Lowest-cost operator:** {best_site} at {gap_series.min()*100:+.1f}% vs benchmark - use as internal best-practice reference.  \n"
+                        f"**Cost variance across selection:** {cost_variance:.1f}pp - closing this gap on the highest-cost site represents the immediate savings opportunity."
+                    )
+                else:
+                    st.info(
+                        f"Selected sites show low cost variance ({cost_variance:.1f}pp). "
+                        f"Lowest-cost operator: **{best_site}** — no material savings opportunity within this peer group."
+                    )
 
     # ── Tab B: Benchmark & ROI ─────────────────────────────────────────────────
     with tab_bench:
         legacy = fdf[fdf["Cluster"].isin(UPGRADE_TIERS)].dropna(subset=["Payback_years"])
-        legacy = legacy.nsmallest(30, "Payback_years")
+        legacy = legacy.nsmallest(30, "Payback_years").sort_values("Payback_years", ascending=False)
         if not legacy.empty:
             fig2 = px.bar(
                 legacy,
@@ -605,7 +799,7 @@ def render_prescriptive(df_full, fdf):
 # SECTION 3 — PREDICTIVE
 # =============================================================================
 def render_predictive(df_full, fdf):
-    st.markdown("## Predictive Analytics - Forecasting & Risk")
+    st.markdown("## Predictive Analytics - Cost Driver Analysis & Risk")
 
     tab_traj, tab_risk = st.tabs(["Cost Driver Analysis", "Risk & Upgrade Simulator"])
 
@@ -743,16 +937,16 @@ def render_predictive(df_full, fdf):
                     )
 
                 # Factor comparison table
+                site_corr_pct = srow["Corrective_maint_spend"] / srow["Annual_opex_usd"] * 100
+                peer_corr_pct = (cl_peers["Corrective_maint_spend"] / cl_peers["Annual_opex_usd"] * 100).median()
                 factor_rows = []
-                for label, col_name, fmt_fn in [
-                    ("Opex / Stall",   "Opex_per_stall",   fmt_m),
-                    ("TCO / kWh",      "TCO_per_kwh_usd",  lambda v: f"${v:.3f}"),
-                    ("Profit Margin",  "Profit_margin",    pct),
-                    ("Site Age (yrs)", "site_age_years",   lambda v: f"{v:.1f}"),
-                    ("kW / Stall",     "kW",               lambda v: f"{v:.0f}"),
+                for label, site_v, med_v, fmt_fn in [
+                    ("Opex / Stall",    srow["Opex_per_stall"],  cl_peers["Opex_per_stall"].median(),  fmt_m),
+                    ("TCO / kWh",       srow["TCO_per_kwh_usd"], cl_peers["TCO_per_kwh_usd"].median(), lambda v: f"${v:.3f}"),
+                    ("Profit Margin",   srow["Profit_margin"],   cl_peers["Profit_margin"].median(),   pct),
+                    ("Site Age (yrs)",  srow["site_age_years"],  cl_peers["site_age_years"].median(),  lambda v: f"{v:.1f}"),
+                    ("Corrective %",    site_corr_pct,           peer_corr_pct,                        lambda v: f"{v:.1f}%"),
                 ]:
-                    site_v = srow[col_name]
-                    med_v  = cl_peers[col_name].median()
                     dev_str = f"{(site_v - med_v) / abs(med_v) * 100:+.1f}%" if med_v else "—"
                     factor_rows.append({
                         "Factor":         label,
@@ -765,16 +959,15 @@ def render_predictive(df_full, fdf):
             with d2:
                 # % deviation from cluster median for each metric
                 labels, deviations, colors = [], [], []
-                for label, col_name, higher_is_worse in [
-                    ("Opex / Stall",    "Opex_per_stall",    True),
-                    ("TCO / kWh",       "TCO_per_kwh_usd",   True),
-                    ("Profit Margin",   "Profit_margin",     False),
-                    ("Site Age",        "site_age_years",    True),
-                    ("kW / Stall",      "kW",                False),
-                    ("Revenue / Stall", "Revenue_per_stall", False),
-                ]:
-                    site_v = srow[col_name]
-                    med_v  = cl_peers[col_name].median()
+                deviation_data = [
+                    ("Opex / Stall",    srow["Opex_per_stall"],  cl_peers["Opex_per_stall"].median(),  True),
+                    ("TCO / kWh",       srow["TCO_per_kwh_usd"], cl_peers["TCO_per_kwh_usd"].median(), True),
+                    ("Profit Margin",   srow["Profit_margin"],   cl_peers["Profit_margin"].median(),   False),
+                    ("Site Age",        srow["site_age_years"],  cl_peers["site_age_years"].median(),  True),
+                    ("Corrective %",    site_corr_pct,           peer_corr_pct,                        True),
+                    ("Revenue / Stall", srow["Revenue_per_stall"], cl_peers["Revenue_per_stall"].median(), False),
+                ]
+                for label, site_v, med_v, higher_is_worse in deviation_data:
                     if med_v and med_v != 0:
                         dev    = (site_v - med_v) / abs(med_v) * 100
                         is_bad = (dev > 0) == higher_is_worse
@@ -836,6 +1029,7 @@ def render_predictive(df_full, fdf):
                                 "Risk_Score": ":.2f", "version": True,
                                 "Risk_Tier": False},
                     opacity=0.75,
+                    render_mode="svg",
                     title="Site Risk Map: TCO/kWh vs Profit Margin",
                     labels={
                         "TCO_per_kwh_usd": "TCO per kWh ($)",
@@ -894,6 +1088,13 @@ def render_predictive(df_full, fdf):
                 incr_profit  = new_prof - curr_prof
                 new_payback  = upgrade_cost / max(incr_profit, 1)
 
+                if new_payback < 5:
+                    st.success("✓ Strong candidate - payback under 5 years")
+                elif new_payback < 8:
+                    st.warning("△ Moderate case - payback 5–8 years")
+                else:
+                    st.error("✗ Weak case - payback exceeds 8 years")
+
                 st.markdown(
                     f"**{site}** — {row['State']} &nbsp;·&nbsp; "
                     f"{row['version']} &nbsp;·&nbsp; {stalls} stalls"
@@ -917,16 +1118,11 @@ def render_predictive(df_full, fdf):
 
                 st.divider()
                 st.metric("Upgrade Cost (est.)", fmt_m(upgrade_cost))
+                st.caption("Based on $150K / stall industry estimate. Actual cost varies by site, contractor, and state.")
                 st.metric(
                     "Incremental Payback",
                     f"{new_payback:.1f} yrs" if new_payback > 0 and new_payback < 100 else "N/A"
                 )
-                if new_payback < 5:
-                    st.success("✓ Strong candidate - payback under 5 years")
-                elif new_payback < 8:
-                    st.warning("△ Moderate case - payback 5–8 years")
-                else:
-                    st.error("✗ Weak case - payback exceeds 8 years")
 
 
 # =============================================================================
