@@ -496,7 +496,7 @@ def render_prescriptive(df_full, fdf):
             st.caption(f"Size Band: **{sc_size}**")
             sc_age      = st.slider("Site Age (yrs)", 1, 14, 7)
             sc_age_band = "Old" if sc_age > 8 else ("Mid" if sc_age >= 3 else "New")
-            st.caption(f"Age Band: **{sc_age_band}** — moderate influence on should-cost (~3–5% of model weight)")
+            st.caption(f"Age Band: **{sc_age_band}** - moderate influence on should-cost (~3–5% of model weight)")
             ver_kw    = {"V1": 72, "V2": 150, "V3": 250}
             sc_cap    = sc_stalls * ver_kw.get(sc_ver, 150)
 
@@ -569,7 +569,7 @@ def render_prescriptive(df_full, fdf):
                 textposition="outside",
             ))
             fig_cats.update_layout(
-                title="Should-Cost Opex — Category Breakdown",
+                title="Should-Cost Opex - Category Breakdown",
                 xaxis=dict(title="Estimated Annual Spend"),
                 height=230,
                 margin=dict(l=0, r=80, t=40, b=0),
@@ -588,7 +588,7 @@ def render_prescriptive(df_full, fdf):
             ].copy()
 
             if not peers.empty:
-                st.markdown("**5 most efficient peer sites (same version / corridor / size) — sorted by Opex/Stall:**")
+                st.markdown("**5 most efficient peer sites (same version / corridor / size) - sorted by Opex/Stall:**")
                 peers["Annual_opex_usd"]    = peers["Annual_opex_usd"].apply(fmt_m)
                 peers["Opex_per_stall"]     = peers["Opex_per_stall"].apply(fmt_m)
                 peers["Annual_revenue_usd"] = peers["Annual_revenue_usd"].apply(fmt_m)
@@ -721,7 +721,7 @@ def render_prescriptive(df_full, fdf):
                 else:
                     st.info(
                         f"Selected sites show low cost variance ({cost_variance:.1f}pp). "
-                        f"Lowest-cost operator: **{best_site}** — no material savings opportunity within this peer group."
+                        f"Lowest-cost operator: **{best_site}** - no material savings opportunity within this peer group."
                     )
 
     # ── Tab B: Benchmark & ROI ─────────────────────────────────────────────────
@@ -808,7 +808,7 @@ def render_predictive(df_full, fdf):
         st.markdown("### Cost Driver Analysis")
         st.markdown(
             '<div class="insight">Identifies which operational factors are systematically '
-            'associated with sites running above their should-cost benchmark — then lets you '
+            'associated with sites running above their should-cost benchmark, then lets you '
             'drill into any individual site to pinpoint its specific cost drivers.</div>',
             unsafe_allow_html=True,
         )
@@ -932,7 +932,7 @@ def render_predictive(df_full, fdf):
                 s_idx = state_gap_map.get(srow["State"], 0.0)
                 if abs(s_idx) > 0.01:
                     st.caption(
-                        f"State cost index [{srow['State']}]: {s_idx*100:+.1f}% — "
+                        f"State cost index [{srow['State']}]: {s_idx*100:+.1f}% - "
                         "typical location premium/discount for this state."
                     )
 
@@ -986,7 +986,7 @@ def render_predictive(df_full, fdf):
                 ))
                 fig_dev.add_vline(x=0, line_color="#6b7280", line_width=1)
                 fig_dev.update_layout(
-                    title=f"{sel_site} — % Deviation from Cluster Median",
+                    title=f"{sel_site} - % Deviation from Cluster Median",
                     xaxis=dict(title="% deviation from cluster median", ticksuffix="%"),
                     yaxis_title="", height=340,
                     margin=dict(l=10, r=80, t=40, b=10), **DARK,
@@ -1089,14 +1089,14 @@ def render_predictive(df_full, fdf):
                 new_payback  = upgrade_cost / max(incr_profit, 1)
 
                 if new_payback < 5:
-                    st.success("✓ Strong candidate - payback under 5 years")
+                    st.success("Strong candidate - payback under 5 years")
                 elif new_payback < 8:
-                    st.warning("△ Moderate case - payback 5–8 years")
+                    st.warning("Moderate case - payback 5–8 years")
                 else:
-                    st.error("✗ Weak case - payback exceeds 8 years")
+                    st.error("Weak case - payback exceeds 8 years")
 
                 st.markdown(
-                    f"**{site}** — {row['State']} &nbsp;·&nbsp; "
+                    f"**{site}** - {row['State']} &nbsp;·&nbsp; "
                     f"{row['version']} &nbsp;·&nbsp; {stalls} stalls"
                 )
 
@@ -1112,8 +1112,8 @@ def render_predictive(df_full, fdf):
                     else:
                         delta = f"{(after - before)/before*100:+.1f}%" if before else "–"
                     ca, cb, cc = st.columns([2, 2, 1])
-                    ca.markdown(f"**{label}**")
-                    cb.markdown(f"{b_fmt} → **{a_fmt}**")
+                    ca.markdown(f"{label}")
+                    cb.markdown(f"{b_fmt} → {a_fmt}")
                     cc.markdown(f"`{delta}`")
 
                 st.divider()
