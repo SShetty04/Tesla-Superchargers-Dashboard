@@ -222,6 +222,21 @@ df["Opex_Gap_Pct"] = df["Opex_Gap"] / df["Should_Cost"]
 # Positive = sites in this state run above their should-cost on average
 state_gap_map = df.groupby("State")["Opex_Gap_Pct"].mean().to_dict()
 
+# Pre-compute V3 upgrade metrics for all Tier 3/5 sites (vectorized batch predict)
+# Avoids 810 row-by-row predict_one() calls every time Tab B renders
+_upgrade_mask = df["Cluster"].isin(UPGRADE_TIERS)
+_v3_feats = df[_upgrade_mask][FEATURES].copy()
+_v3_feats["version"]           = "V3"
+_v3_feats["Capacity_kw_total"] = _v3_feats["Stalls"] * 250
+df.loc[_upgrade_mask, "_v3_opex"] = opex_model.predict(_encode_with(_v3_feats, opex_enc))
+df.loc[_upgrade_mask, "_v3_rev"]  = rev_model.predict(_encode_with(_v3_feats, rev_enc))
+df["_curr_prof"]            = df["Annual_revenue_usd"] - df["Annual_opex_usd"]
+df["_v3_prof"]              = df["_v3_rev"] - df["_v3_opex"]
+df["_incr_profit"]          = df["_v3_prof"] - df["_curr_prof"]
+df["Upgrade_Cost"]          = df["Stalls"] * 150_000
+df["Upgrade_Payback_years"] = df["Upgrade_Cost"] / df["_incr_profit"].clip(lower=1)
+df["Incr_Annual_Profit"]    = df["_incr_profit"]
+
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -525,13 +540,18 @@ def render_prescriptive(df_full, fdf):
             else:
                 comp_cluster = "Tier 5 - Retirement Pipeline"
 
-            cl_avg   = df_full[df_full["Cluster"] == comp_cluster]["Annual_opex_usd"].mean()
-            gap_pct  = (adj_opex - cl_avg) / cl_avg if cl_avg > 0 else 0
+            cl_peers_avg = df_full[
+                (df_full["Cluster"] == comp_cluster) &
+                (df_full["Size_band"] == sc_size) &
+                (df_full["Corridor"] == sc_cor)
+            ]["Annual_opex_usd"].mean()
+            cl_avg  = cl_peers_avg if not np.isnan(cl_peers_avg) else df_full[df_full["Cluster"] == comp_cluster]["Annual_opex_usd"].mean()
+            gap_pct = (adj_opex - cl_avg) / cl_avg if cl_avg > 0 else 0
 
             r1, r2, r3 = st.columns(3)
             with r1:
                 st.metric("Should-Cost Opex", fmt_m(adj_opex),
-                          delta=f"{gap_pct*100:+.1f}% vs cluster avg",
+                          delta=f"{gap_pct*100:+.1f}% vs peer avg",
                           delta_color="inverse")
             with r2:
                 st.metric("Predicted Revenue", fmt_m(pred_rev))
@@ -542,13 +562,13 @@ def render_prescriptive(df_full, fdf):
             if abs(state_adj) > 0.005:
                 direction = "above" if state_adj > 0 else "below"
                 st.info(
-                    f"**Cluster:** {comp_cluster} &nbsp;·&nbsp; Cluster avg: {fmt_m(cl_avg)}  \n"
+                    f"**Cluster:** {comp_cluster} &nbsp;·&nbsp; Peer avg ({sc_size} / {sc_cor.replace(' Adoption Corridor', '')}): {fmt_m(cl_avg)}  \n"
                     f"State index [{sc_state}]: {state_adj*100:+.1f}% - {sc_state} sites "
                     f"typically run {abs(state_adj)*100:.1f}% {direction} their model baseline. "
                     f"Base: {fmt_m(pred_opex)} → State-adjusted: {fmt_m(adj_opex)}"
                 )
             else:
-                st.info(f"**Cluster:** {comp_cluster} &nbsp;·&nbsp; Cluster avg: {fmt_m(cl_avg)}")
+                st.info(f"**Cluster:** {comp_cluster} &nbsp;·&nbsp; Peer avg ({sc_size} / {sc_cor.replace(' Adoption Corridor', '')}): {fmt_m(cl_avg)}")
 
             # Category breakdown — ratios from peer sites, not hardcoded
             peer_pool = df_full[
@@ -726,29 +746,58 @@ def render_prescriptive(df_full, fdf):
 
     # ── Tab B: Benchmark & ROI ─────────────────────────────────────────────────
     with tab_bench:
-        legacy = fdf[fdf["Cluster"].isin(UPGRADE_TIERS)].dropna(subset=["Payback_years"])
-        legacy = legacy.nsmallest(30, "Payback_years").sort_values("Payback_years", ascending=False)
+        legacy = fdf[fdf["Cluster"].isin(UPGRADE_TIERS)].dropna(subset=["Upgrade_Payback_years"])
+        legacy = legacy.nsmallest(30, "Upgrade_Payback_years")
+
         if not legacy.empty:
-            fig2 = px.bar(
+            legacy["Payback_Tier"] = pd.cut(
+                legacy["Upgrade_Payback_years"],
+                bins=[0, 5, 8, float("inf")],
+                labels=["< 5 yrs (Act Now)", "5–8 yrs (Plan)", "> 8 yrs (Deprioritize)"],
+            ).astype(str)
+
+            median_profit = legacy["Incr_Annual_Profit"].median()
+            median_cost   = legacy["Upgrade_Cost"].median()
+
+            fig2 = px.scatter(
                 legacy,
-                x="Payback_years",
-                y="Supercharger",
-                orientation="h",
-                color="Cluster",
-                title="Upgrade ROI - Tier 3 & Tier 5 Sites  |  Shortest payback = strongest V3 upgrade case",
-                labels={"Payback_years": "Payback Period (years)", "Supercharger": ""},
-                color_discrete_map=CLUSTER_COLORS,
-                height=700,
+                x="Incr_Annual_Profit",
+                y="Upgrade_Cost",
+                color="Payback_Tier",
+                size="Stalls",
+                size_max=22,
+                hover_name="Supercharger",
+                hover_data={
+                    "State": True,
+                    "version": True,
+                    "Stalls": True,
+                    "Upgrade_Cost": ":$,.0f",
+                    "Incr_Annual_Profit": ":$,.0f",
+                    "Upgrade_Payback_years": ":.1f",
+                    "Payback_Tier": False,
+                },
+                color_discrete_map={
+                    "< 5 yrs (Act Now)":      "#10B981",
+                    "5–8 yrs (Plan)":         "#F59E0B",
+                    "> 8 yrs (Deprioritize)": "#6B7280",
+                },
+                category_orders={"Payback_Tier": ["< 5 yrs (Act Now)", "5–8 yrs (Plan)", "> 8 yrs (Deprioritize)"]},
+                title="V3 Upgrade ROI Quadrant - Top 30 Sites",
+                labels={
+                    "Incr_Annual_Profit": "Incremental Annual Profit ($)",
+                    "Upgrade_Cost":       "Upgrade Cost ($)",
+                },
+                height=520,
                 template="plotly_dark",
-                hover_data={"version": True, "State": True, "Stalls": True,
-                            "Annual_revenue_usd": ":$,.0f", "Cluster": False},
             )
-            fig2.add_vline(x=5, line_dash="dash", line_color="#6b7280",
-                           annotation_text="5-yr threshold", annotation_position="top right")
+            fig2.add_vline(x=median_profit, line_dash="dash", line_color="#4b5563",
+                           annotation_text="Median profit gain", annotation_position="top")
+            fig2.add_hline(y=median_cost, line_dash="dash", line_color="#4b5563",
+                           annotation_text="Median upgrade cost", annotation_position="right")
             fig2.update_layout(
-                yaxis=dict(tickfont=dict(size=11)),
-                xaxis=dict(title="Payback Period (years)"),
-                legend=dict(orientation="h", y=-0.08),
+                xaxis=dict(tickprefix="$", tickformat=",.0f"),
+                yaxis=dict(tickprefix="$", tickformat=",.0f"),
+                legend=dict(orientation="h", y=-0.12, title="Payback Tier"),
                 **BG,
             )
             st.plotly_chart(fig2, use_container_width=True)
@@ -799,9 +848,9 @@ def render_prescriptive(df_full, fdf):
 # SECTION 3 — PREDICTIVE
 # =============================================================================
 def render_predictive(df_full, fdf):
-    st.markdown("## Predictive Analytics - Cost Driver Analysis & Risk")
+    st.markdown("## Predictive Analytics - Risk & Cost Driver Analysis")
 
-    tab_traj, tab_risk = st.tabs(["Cost Driver Analysis", "Risk & Upgrade Simulator"])
+    tab_risk, tab_traj = st.tabs(["Risk & Upgrade Simulator", "Cost Driver Analysis"])
 
     # ── Tab A: Cost Driver Analysis ────────────────────────────────────────────
     with tab_traj:
@@ -1004,57 +1053,13 @@ def render_predictive(df_full, fdf):
 
     # ── Tab B: Risk & Upgrade Simulator ───────────────────────────────────────
     with tab_risk:
-        col_risk, col_sim = st.columns([3, 2])
+        st.markdown("### V3 Upgrade Simulator")
+        st.caption("Predict post-upgrade metrics for any V1 / V2 Legacy / Large site.")
+        sim_col, cost_col = st.columns([2, 1])
+        _upgrade_cost = None
+        _new_payback  = None
 
-        with col_risk:
-            risk_df = fdf.dropna(subset=["Risk_Score", "TCO_per_kwh_usd", "Profit_margin"])
-            risk_df = risk_df[risk_df["Risk_Tier"].notna()].copy()
-
-            if not risk_df.empty:
-                fig = px.scatter(
-                    risk_df,
-                    x="TCO_per_kwh_usd",
-                    y="Profit_margin",
-                    color="Risk_Tier",
-                    size="Risk_Score",
-                    size_max=16,
-                    color_discrete_map={
-                        "Low":    "#10B981",
-                        "Medium": "#F59E0B",
-                        "High":   "#E31937",
-                    },
-                    category_orders={"Risk_Tier": ["Low", "Medium", "High"]},
-                    hover_name="Supercharger",
-                    hover_data={"State": True, "Cluster": True,
-                                "Risk_Score": ":.2f", "version": True,
-                                "Risk_Tier": False},
-                    opacity=0.75,
-                    render_mode="svg",
-                    title="Site Risk Map: TCO/kWh vs Profit Margin",
-                    labels={
-                        "TCO_per_kwh_usd": "TCO per kWh ($)",
-                        "Profit_margin":   "Profit Margin",
-                    },
-                    height=400,
-                    template="plotly_dark",
-                )
-                fig.update_layout(yaxis=dict(tickformat=".0%"), **BG)
-                st.plotly_chart(fig, use_container_width=True)
-
-                n_high = (risk_df["Risk_Tier"] == "High").sum()
-                n_med  = (risk_df["Risk_Tier"] == "Medium").sum()
-                n_low  = (risk_df["Risk_Tier"] == "Low").sum()
-                r1, r2, r3 = st.columns(3)
-                r1.metric("High Risk Sites",   f"{n_high:,}")
-                r2.metric("Medium Risk Sites", f"{n_med:,}")
-                r3.metric("Low Risk Sites",    f"{n_low:,}")
-            else:
-                st.info("Insufficient risk data for current filter.")
-
-        with col_sim:
-            st.markdown("**V3 Upgrade Simulator**")
-            st.caption("Predict post-upgrade metrics for any V1 / V2 Legacy / Large site.")
-
+        with sim_col:
             legacy_sites = df_full[
                 df_full["Cluster"].isin(UPGRADE_TIERS)
             ]["Supercharger"].sort_values().tolist()
@@ -1084,9 +1089,11 @@ def render_predictive(df_full, fdf):
                 new_prof = new_rev - new_opex
                 new_marg = (new_rev - new_opex) / new_rev if new_rev > 0 else 0
 
-                upgrade_cost = stalls * 150_000
-                incr_profit  = new_prof - curr_prof
-                new_payback  = upgrade_cost / max(incr_profit, 1)
+                upgrade_cost  = stalls * 150_000
+                incr_profit   = new_prof - curr_prof
+                new_payback   = upgrade_cost / max(incr_profit, 1)
+                _upgrade_cost = upgrade_cost
+                _new_payback  = new_payback
 
                 if new_payback < 5:
                     st.success("Strong candidate - payback under 5 years")
@@ -1116,13 +1123,61 @@ def render_predictive(df_full, fdf):
                     cb.markdown(f"{b_fmt} → {a_fmt}")
                     cc.markdown(f"`{delta}`")
 
-                st.divider()
-                st.metric("Upgrade Cost (est.)", fmt_m(upgrade_cost))
+        with cost_col:
+            if _upgrade_cost is not None:
+                st.markdown("**Investment Summary**")
+                st.metric("Upgrade Cost (est.)", fmt_m(_upgrade_cost))
                 st.caption("Based on $150K / stall industry estimate. Actual cost varies by site, contractor, and state.")
                 st.metric(
                     "Incremental Payback",
-                    f"{new_payback:.1f} yrs" if new_payback > 0 and new_payback < 100 else "N/A"
+                    f"{_new_payback:.1f} yrs" if _new_payback > 0 and _new_payback < 100 else "N/A"
                 )
+
+        st.divider()
+        st.markdown("### Site Risk Map")
+        risk_df = fdf.dropna(subset=["Risk_Score", "TCO_per_kwh_usd", "Profit_margin"])
+        risk_df = risk_df[risk_df["Risk_Tier"].notna()].copy()
+
+        if not risk_df.empty:
+            fig = px.scatter(
+                risk_df,
+                x="TCO_per_kwh_usd",
+                y="Profit_margin",
+                color="Risk_Tier",
+                size="Risk_Score",
+                size_max=16,
+                color_discrete_map={
+                    "Low":    "#10B981",
+                    "Medium": "#F59E0B",
+                    "High":   "#E31937",
+                },
+                category_orders={"Risk_Tier": ["Low", "Medium", "High"]},
+                hover_name="Supercharger",
+                hover_data={"State": True, "Cluster": True,
+                            "Risk_Score": ":.2f", "version": True,
+                            "Risk_Tier": False},
+                opacity=0.75,
+                render_mode="svg",
+                title="Site Risk Map: TCO/kWh vs Profit Margin",
+                labels={
+                    "TCO_per_kwh_usd": "TCO per kWh ($)",
+                    "Profit_margin":   "Profit Margin",
+                },
+                height=400,
+                template="plotly_dark",
+            )
+            fig.update_layout(yaxis=dict(tickformat=".0%"), **BG)
+            st.plotly_chart(fig, use_container_width=True)
+
+            n_high = (risk_df["Risk_Tier"] == "High").sum()
+            n_med  = (risk_df["Risk_Tier"] == "Medium").sum()
+            n_low  = (risk_df["Risk_Tier"] == "Low").sum()
+            r1, r2, r3 = st.columns(3)
+            r1.metric("High Risk Sites",   f"{n_high:,}")
+            r2.metric("Medium Risk Sites", f"{n_med:,}")
+            r3.metric("Low Risk Sites",    f"{n_low:,}")
+        else:
+            st.info("Insufficient risk data for current filter.")
 
 
 # =============================================================================
