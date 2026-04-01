@@ -297,6 +297,27 @@ if len(fdf) == 0:
 def render_descriptive(fdf):
     st.markdown("## Network Overview")
 
+    # Tier definitions
+    tier_defs = [
+        ("Tier 1 - Priority Fleet",      "#E31937", "V3 chargers in high EV adoption corridors. Highest revenue, core network backbone."),
+        ("Tier 2 - Growth Markets",       "#F59E0B", "V3 chargers in lower EV adoption corridors. Strong hardware, developing demand."),
+        ("Tier 3 - Upgrade Pipeline",     "#8B5CF6", "V1/V2 chargers in high EV adoption corridors. High upgrade ROI given strong local demand."),
+        ("Tier 4 - Stable Network",       "#6366F1", "V2 chargers in lower EV adoption corridors. Steady performers, lower strategic priority."),
+        ("Tier 5 - Retirement Pipeline",  "#6B7280", "V1 chargers in lower EV adoption corridors. Oldest hardware, lowest demand - candidates for retirement or upgrade."),
+    ]
+    tier_cols = st.columns(5)
+    for col, (name, color, desc) in zip(tier_cols, tier_defs):
+        with col:
+            st.markdown(
+                f'<div style="border-top:3px solid {color};padding:10px 0 4px">'
+                f'<div style="font-size:13px;font-weight:600;color:{color};margin-bottom:6px">{name}</div>'
+                f'<div style="font-size:12px;color:#9ca3af;line-height:1.5">{desc}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
     # KPI Cards
     stats = (
         fdf.groupby("Cluster")
@@ -454,25 +475,6 @@ def render_descriptive(fdf):
     )
     st.plotly_chart(fig3, use_container_width=True)
 
-    # Tier definitions
-    st.markdown("### Tier Definitions")
-    tier_defs = [
-        ("Tier 1 - Priority Fleet",      "#E31937", "V3 chargers in high EV adoption corridors. Highest revenue, core network backbone."),
-        ("Tier 2 - Growth Markets",       "#F59E0B", "V3 chargers in lower EV adoption corridors. Strong hardware, developing demand."),
-        ("Tier 3 - Upgrade Pipeline",     "#8B5CF6", "V1/V2 chargers in high EV adoption corridors. High upgrade ROI given strong local demand."),
-        ("Tier 4 - Stable Network",       "#6366F1", "V2 chargers in lower EV adoption corridors. Steady performers, lower strategic priority."),
-        ("Tier 5 - Retirement Pipeline",  "#6B7280", "V1 chargers in lower EV adoption corridors. Oldest hardware, lowest demand - candidates for retirement or upgrade."),
-    ]
-    tier_cols = st.columns(5)
-    for col, (name, color, desc) in zip(tier_cols, tier_defs):
-        with col:
-            st.markdown(
-                f'<div style="border-top:3px solid {color};padding:10px 0 4px">'
-                f'<div style="font-size:13px;font-weight:600;color:{color};margin-bottom:6px">{name}</div>'
-                f'<div style="font-size:12px;color:#9ca3af;line-height:1.5">{desc}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
 
 
 # =============================================================================
@@ -494,7 +496,7 @@ def render_prescriptive(df_full, fdf):
     s3.metric("Avg Cost Variance", f"{avg_gap_pct*100:+.1f}%",
               delta="vs peer-based benchmark", delta_color="inverse")
 
-    tab_calc, tab_bench = st.tabs(["Should-Cost Calculator", "Benchmark & Upgrade ROI"])
+    tab_calc, tab_bench = st.tabs(["Should-Cost Calculator", "Benchmark & Top Procurement Opportunities"])
 
     # ── Tab A: Should-Cost Calculator ─────────────────────────────────────────
     with tab_calc:
@@ -616,8 +618,9 @@ def render_prescriptive(df_full, fdf):
                 peers.columns = ["Site", "State", "Opex", "Opex/Stall", "Revenue", "Margin"]
                 st.dataframe(peers, use_container_width=True, hide_index=True)
 
+    # ── Tab B: Benchmark & Top Procurement Opportunities ──────────────────────
+    with tab_bench:
         # ── Site-to-Site Comparison ────────────────────────────────────────────
-        st.divider()
         st.markdown("### Site-to-Site Comparison")
         selected_sites = st.multiselect(
             "Select sites to compare (2–5 recommended)",
@@ -744,67 +747,8 @@ def render_prescriptive(df_full, fdf):
                         f"Lowest-cost operator: **{best_site}** - no material savings opportunity within this peer group."
                     )
 
-    # ── Tab B: Benchmark & ROI ─────────────────────────────────────────────────
-    with tab_bench:
-        legacy = fdf[fdf["Cluster"].isin(UPGRADE_TIERS)].dropna(subset=["Upgrade_Payback_years"])
-        legacy = legacy.nsmallest(30, "Upgrade_Payback_years")
-
-        if not legacy.empty:
-            legacy["Payback_Tier"] = pd.cut(
-                legacy["Upgrade_Payback_years"],
-                bins=[0, 5, 8, float("inf")],
-                labels=["< 5 yrs (Act Now)", "5–8 yrs (Plan)", "> 8 yrs (Deprioritize)"],
-            ).astype(str)
-
-            median_profit = legacy["Incr_Annual_Profit"].median()
-            median_cost   = legacy["Upgrade_Cost"].median()
-
-            fig2 = px.scatter(
-                legacy,
-                x="Incr_Annual_Profit",
-                y="Upgrade_Cost",
-                color="Payback_Tier",
-                size="Stalls",
-                size_max=22,
-                hover_name="Supercharger",
-                hover_data={
-                    "State": True,
-                    "version": True,
-                    "Stalls": True,
-                    "Upgrade_Cost": ":$,.0f",
-                    "Incr_Annual_Profit": ":$,.0f",
-                    "Upgrade_Payback_years": ":.1f",
-                    "Payback_Tier": False,
-                },
-                color_discrete_map={
-                    "< 5 yrs (Act Now)":      "#10B981",
-                    "5–8 yrs (Plan)":         "#F59E0B",
-                    "> 8 yrs (Deprioritize)": "#6B7280",
-                },
-                category_orders={"Payback_Tier": ["< 5 yrs (Act Now)", "5–8 yrs (Plan)", "> 8 yrs (Deprioritize)"]},
-                title="V3 Upgrade ROI Quadrant - Top 30 Sites",
-                labels={
-                    "Incr_Annual_Profit": "Incremental Annual Profit ($)",
-                    "Upgrade_Cost":       "Upgrade Cost ($)",
-                },
-                height=520,
-                template="plotly_dark",
-            )
-            fig2.add_vline(x=median_profit, line_dash="dash", line_color="#4b5563",
-                           annotation_text="Median profit gain", annotation_position="top")
-            fig2.add_hline(y=median_cost, line_dash="dash", line_color="#4b5563",
-                           annotation_text="Median upgrade cost", annotation_position="right")
-            fig2.update_layout(
-                xaxis=dict(tickprefix="$", tickformat=",.0f"),
-                yaxis=dict(tickprefix="$", tickformat=",.0f"),
-                legend=dict(orientation="h", y=-0.12, title="Payback Tier"),
-                **BG,
-            )
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.info("No Upgrade Pipeline / Retirement Pipeline sites in current filter.")
-
-        # Outlier table
+        # ── Top Procurement Opportunities ─────────────────────────────────────
+        st.divider()
         st.markdown("### Top Procurement Opportunities - Highest Opex vs. Should-Cost Gap")
         outliers = fdf.dropna(subset=["Opex_Gap_Pct"]).nlargest(15, "Opex_Gap_Pct")[
             ["Supercharger", "State", "Cluster", "version",
